@@ -203,6 +203,8 @@ let bag = [], nextQueue = [];
 let score = 0, lines = 0, level = 1, best = store.get();
 let state = 'start'; // start | playing | paused | over
 let dropCounter = 0, dropInterval = 1000, lastTime = 0;
+let clearing = false, flashRows = [], flashStart = 0;
+const CLEAR_MS = 150;
 
 function roundRect(ctx, x, y, w, h, r) {
   ctx.beginPath();
@@ -253,8 +255,8 @@ function collide(p, dx, dy, shape = p.shape) {
     for (let x = 0; x < shape[y].length; x++) {
       if (!shape[y][x]) continue;
       const nx = p.x + x + dx, ny = p.y + y + dy;
-      if (nx < 0 || nx >= COLS || ny >= ROWS) return true;
-      if (ny >= 0 && board[ny][nx]) return true;
+      if (nx < 0 || nx >= COLS || ny < 0 || ny >= ROWS) return true;
+      if (board[ny][nx]) return true;
     }
   }
   return false;
@@ -319,17 +321,15 @@ function merge(p) {
   }));
 }
 
-function clearLines() {
-  let cleared = 0;
-  for (let y = ROWS - 1; y >= 0; y--) {
-    if (board[y].every(v => v)) {
-      board.splice(y, 1);
-      board.unshift(Array(COLS).fill(0));
-      cleared++;
-      y++;
-    }
-  }
-  return cleared;
+function findFullRows() {
+  const rows = [];
+  for (let y = 0; y < ROWS; y++) if (board[y].every(v => v)) rows.push(y);
+  return rows;
+}
+
+function removeRows(rows) {
+  for (let i = rows.length - 1; i >= 0; i--) board.splice(rows[i], 1);
+  for (let i = 0; i < rows.length; i++) board.unshift(Array(COLS).fill(0));
 }
 
 function drop() {
@@ -337,19 +337,33 @@ function drop() {
   if (!cur) return;
   if (collide(cur, 0, 1)) {
     merge(cur);
-    const n = clearLines();
-    if (n) {
-      score += SCORE_TABLE[n] * level;
-      lines += n;
-      level = Math.floor(lines / 10) + 1;
-      dropInterval = Math.max(80, 1000 - (level - 1) * 80);
-      updateUI();
+    const full = findFullRows();
+    if (full.length) {
+      cur = null;
+      flashRows = full;
+      flashStart = performance.now();
+      clearing = true;
+    } else {
+      newPiece();
+      canHold = true;
     }
-    newPiece();
-    canHold = true;
   } else {
     cur.y++;
   }
+}
+
+function finishClear() {
+  const n = flashRows.length;
+  removeRows(flashRows);
+  flashRows = [];
+  clearing = false;
+  score += SCORE_TABLE[n] * level;
+  lines += n;
+  level = Math.floor(lines / 10) + 1;
+  dropInterval = Math.max(80, 1000 - (level - 1) * 80);
+  updateUI();
+  newPiece();
+  canHold = true;
 }
 
 function reset() {
@@ -441,17 +455,31 @@ function draw() {
     if (state === 'playing') {
       let gy = 0;
       while (!collide(cur, 0, gy + 1)) gy++;
-      cur.shape.forEach((row, y) => row.forEach((v, x) => {
-        if (v && cur.y + y + gy >= 0) {
-          ctxB.globalAlpha = 0.22;
-          cellRect(ctxB, (cur.x + x) * CELL, (cur.y + y + gy) * CELL, CELL, COLORS[cur.type]);
-          ctxB.globalAlpha = 1;
-        }
-      }));
+      if (gy > 0) {
+        ctxB.strokeStyle = COLORS[cur.type];
+        ctxB.lineWidth = 2;
+        cur.shape.forEach((row, y) => row.forEach((v, x) => {
+          if (v && cur.y + y + gy >= 0) {
+            const px = (cur.x + x) * CELL, py = (cur.y + y + gy) * CELL;
+            ctxB.globalAlpha = 0.08;
+            ctxB.fillStyle = COLORS[cur.type];
+            ctxB.fillRect(px + 1, py + 1, CELL - 2, CELL - 2);
+            ctxB.globalAlpha = 0.55;
+            roundRect(ctxB, px + 2.5, py + 2.5, CELL - 5, CELL - 5, 4);
+            ctxB.stroke();
+          }
+        }));
+        ctxB.globalAlpha = 1;
+      }
     }
     cur.shape.forEach((row, y) => row.forEach((v, x) => {
       if (v && cur.y + y >= 0) cellRect(ctxB, (cur.x + x) * CELL, (cur.y + y) * CELL, CELL, COLORS[cur.type]);
     }));
+  }
+  if (flashRows.length) {
+    const p = Math.min(1, (performance.now() - flashStart) / CLEAR_MS);
+    ctxB.fillStyle = `rgba(255,255,255,${(0.85 * (1 - p)).toFixed(3)})`;
+    flashRows.forEach(y => ctxB.fillRect(0, y * CELL, COLS * CELL, CELL));
   }
   drawSide();
 }
@@ -461,9 +489,13 @@ function loop(t) {
   if (!lastTime) lastTime = t;
   const dt = t - lastTime;
   lastTime = t;
-  if (state === 'playing' && cur) {
-    dropCounter += dt;
-    if (dropCounter >= dropInterval) drop();
+  if (state === 'playing') {
+    if (clearing) {
+      if (t - flashStart >= CLEAR_MS) finishClear();
+    } else if (cur) {
+      dropCounter += dt;
+      if (dropCounter >= dropInterval) drop();
+    }
   }
   draw();
 }
